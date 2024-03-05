@@ -1,0 +1,19 @@
+credentials:
+  usernames:
+    ever:
+      email: ever@gmail.com
+      name: Ever Cristian Coarite Vasquez
+      logged_in: false
+      password: 12345a # To be replaced with hashed password
+    invitado:
+      email: invitado@gmail.com
+      logged_in: false
+      name: Usuario Invitado
+      password: 00000a # To be replaced with hashed password
+cookie:
+  expiry_days: 30
+  key: random_signature_key # Must be string
+  name: auth_cookie_name
+preauthorized:
+  emails:
+  - ever123cristian@gmail.com
