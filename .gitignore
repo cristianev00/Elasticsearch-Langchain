@@ -16,3 +16,4 @@ docs/
 # Environments
 .env
 
+.langchain_cache.db
