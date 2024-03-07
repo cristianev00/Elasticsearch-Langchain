@@ -22,7 +22,7 @@ from langchain.retrievers.multi_query import MultiQueryRetriever
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from operator import itemgetter
 
-#cache
+# cache
 from langchain.globals import set_llm_cache
 from langchain.cache import SQLiteCache
 from langchain_community.callbacks import get_openai_callback
@@ -46,6 +46,7 @@ authenticator = stauth.Authenticate(
     config["cookie"]["expiry_days"],
     config["preauthorized"],
 )
+
 
 def get_session_history(session_id: str):
     chat_history = ElasticsearchChatMessageHistory(
@@ -99,10 +100,13 @@ def save_pdfs(pdf_docs):
 
 
 # Load documents from directory
-def get_pdf_loaders(pdf_docs):
+def get_pdf_loaders(pdf_docs, expediente):
     for pdf in pdf_docs:
         loader = PyPDFLoader(pdf)
         documents = loader.load()
+        for doc in documents:
+            # Add metadata to the document
+            doc.metadata["expediente"] = expediente
     return documents
 
 
@@ -114,14 +118,13 @@ def get_text_chunks_elasticSearch(documents):
         add_start_index=True,
     )
     chunks = text_splitter.split_documents(documents)
-    
-        
+
     return chunks
 
 
 def get_vectorstore_elasticSearch(text_chunks):
     with get_openai_callback() as cb:
-        
+
         embeddings = OpenAIEmbeddings()
         vectorstore = ElasticsearchStore.from_documents(
             text_chunks,
@@ -135,7 +138,7 @@ def get_vectorstore_elasticSearch(text_chunks):
     return vectorstore
 
 
-def chatbot(prompt):
+def chatbot(prompt, metadata):
 
     embeddings = OpenAIEmbeddings()
     db = ElasticsearchStore(
@@ -148,9 +151,28 @@ def chatbot(prompt):
 
     llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0.5)
 
-    retriever = MultiQueryRetriever.from_llm(
-        retriever=db.as_retriever(search_kwargs={"k": 3}), llm=llm, 
-    )
+    if len(metadata) > 0:
+        # Split the metadata string into an array separated by commas,
+        # strip each element, and add "add this" to each element
+        metadata_array = [data.strip() for data in metadata.split(",")]
+        metadata_array.append("Ley N° 254 CODIGO PROCESAL CONSTITUCIONAL")
+
+        retriever = MultiQueryRetriever.from_llm(
+            retriever=db.as_retriever(
+                search_kwargs={
+                    "k": 3,
+                    "filter": {
+                        "terms": {"metadata.expediente.keyword": metadata_array}
+                    },
+                }
+            ),
+            llm=llm,
+        )
+    else:
+        retriever = MultiQueryRetriever.from_llm(
+            retriever=db.as_retriever(search_kwargs={"k": 3}),
+            llm=llm,
+        )
 
     session_id = str(st.session_state["name"])
     chat_history = get_session_history(session_id)
@@ -203,13 +225,13 @@ def chatbot(prompt):
             "chat_history": itemgetter("chat_history"),
         }
     ).assign(answer=rag_chain_from_docs)
-    
+
     with get_openai_callback() as cb:
         results = rag_chain_with_source.invoke(
             {"question": prompt, "chat_history": chat_history.messages}
         )
         print(cb)
-        
+
     chat_history.add_user_message(prompt)
     chat_history.add_ai_message(results["answer"])
 
@@ -218,7 +240,6 @@ def chatbot(prompt):
 
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
-
 
 
 def main():
@@ -254,8 +275,46 @@ def main():
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-    
+
+    with st.sidebar:
+        if st.button("Borrar Historial"):
+            history.clear()
+            st.session_state.messages = []
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+        authenticator.logout("Salir")
+        st.write(f'Bienvenido *{st.session_state["name"]}*')
+        st.subheader("Tus documentos")
+        pdf_docs = st.file_uploader(
+            "Carga tus archivos PDF's y luego presiona 'Procesar'",
+            accept_multiple_files=True,
+            type="pdf",
+        )
+
+        expediente = st.text_input("Ingresa el No. Expediente")
+
+        if pdf_docs is not None and st.button("Procesar") and len(expediente) > 0:
+            with st.spinner("Procesando..."):
+                # Save PDFs and get their paths
+                pdf_paths = save_pdfs(pdf_docs)
+                st.write("PDFs guardado en las siguientes rutas:")
+                for path in pdf_paths:
+                    st.write(path)
+                # empty the file uploader
+                pdf_docs = None
+                # get pdf text
+                documents = get_pdf_loaders(pdf_paths, expediente=expediente)
+                # get the text chunks
+                text_chunks = get_text_chunks_elasticSearch(documents)
+                # create vector store
+                vectorstore = get_vectorstore_elasticSearch(text_chunks)
+        else:
+            st.write("Introduce No. Expediente")
+
     # React to user input
+
     if prompt := st.chat_input("Pregunta algo..."):
 
         # Add user message to chat history
@@ -264,7 +323,7 @@ def main():
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        answer = chatbot(prompt)
+        answer = chatbot(prompt, expediente)
         # Display assistant response in chat message container
         with st.chat_message("assistant"):
             response = st.write(answer["answer"])
@@ -285,40 +344,6 @@ def main():
             width_dialog="xl",
         )
 
-    with st.sidebar:
-        if st.button("Borrar Historial"):
-            history.clear()
-            st.session_state.messages = []
-            for message in st.session_state.messages:
-                with st.chat_message(message["role"]):
-                    st.markdown(message["content"])
-
-        authenticator.logout("Salir")
-        st.write(f'Bienvenido *{st.session_state["name"]}*')
-        st.subheader("Tus documentos")
-        pdf_docs = st.file_uploader(
-            "Carga tus archivos PDF's y luego presiona 'Procesar'",
-            accept_multiple_files=True,
-            type="pdf",
-        )
-    
-
-        if pdf_docs is not None and st.button("Procesar"):
-            with st.spinner("Procesando..."):
-                # Save PDFs and get their paths
-                pdf_paths = save_pdfs(pdf_docs)
-                st.write("PDFs guardado en las siguientes rutas:")
-                for path in pdf_paths:
-                    st.write(path)
-                # empty the file uploader
-                pdf_docs = None
-                # get pdf text
-                documents = get_pdf_loaders(pdf_paths)
-                # get the text chunks
-                text_chunks = get_text_chunks_elasticSearch(documents)
-                # create vector store
-                vectorstore = get_vectorstore_elasticSearch(text_chunks)
-
 
 if __name__ == "__main__":
     authenticator.login()
@@ -328,4 +353,3 @@ if __name__ == "__main__":
         st.error("Username/password is incorrect")
     elif st.session_state["authentication_status"] is None:
         st.warning("Please enter your username and password")
-
