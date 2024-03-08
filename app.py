@@ -113,7 +113,7 @@ def get_pdf_loaders(pdf_docs, expediente):
 def get_text_chunks_elasticSearch(documents):
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
-        chunk_overlap=20,
+        chunk_overlap=200,
         length_function=len,
         add_start_index=True,
     )
@@ -170,7 +170,7 @@ def chatbot(prompt, metadata):
         )
     else:
         retriever = MultiQueryRetriever.from_llm(
-            retriever=db.as_retriever(search_kwargs={"k": 3}),
+            retriever=db.as_retriever(search_kwargs={"k": 5}),
             llm=llm,
         )
 
