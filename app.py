@@ -5,6 +5,7 @@ from yaml.loader import SafeLoader
 from st_mui_dialog import st_mui_dialog
 import os
 from dotenv import load_dotenv
+from elasticsearch import Elasticsearch
 
 #
 from langchain_community.document_loaders import PyPDFLoader
@@ -27,6 +28,8 @@ from langchain.globals import set_llm_cache
 from langchain.cache import SQLiteCache
 from langchain_community.callbacks import get_openai_callback
 
+import json
+
 set_llm_cache(SQLiteCache(database_path=".langchain_cache.db"))
 
 load_dotenv()
@@ -47,7 +50,22 @@ authenticator = stauth.Authenticate(
     config["preauthorized"],
 )
 
+es = Elasticsearch(ELASTICSEARCH_URL)
+# Create Elasticsearch index
+index_name = "files"
+if not es.indices.exists(index=index_name):
+    es.indices.create(index=index_name)
 
+
+def save_filename(text:str):
+    doc = {"text": text}
+    resp = es.index(index="files", body=doc)
+
+def get_filenames():
+    response = es.search(index="files", body={"query": {"match_all": {}}})
+    texts = [hit['_source']['text'] for hit in response['hits']['hits']]
+    return texts
+    
 def get_session_history(session_id: str):
     chat_history = ElasticsearchChatMessageHistory(
         es_url=ELASTICSEARCH_URL,
@@ -96,14 +114,18 @@ def save_pdfs(pdf_docs):
             f.write(pdf_file.getvalue())
         saved_paths.append(pdf_path)
         existing_files.add(filename)
+    
     return saved_paths
 
 
 # Load documents from directory
 def get_pdf_loaders(pdf_docs, expediente):
+    documents = []
     for pdf in pdf_docs:
         loader = PyPDFLoader(pdf)
-        documents = loader.load()
+        documents.extend(loader.load())
+        print(documents)
+        #documents = loader.load()
         for doc in documents:
             # Add metadata to the document
             doc.metadata["expediente"] = expediente
@@ -149,20 +171,16 @@ def chatbot(prompt, metadata):
     )
     db.client.indices.refresh(index=ELASTICSEARCH_INDEX_NAME)
 
-    llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0.5)
+    llm = ChatOpenAI(model_name="gpt-3.5-turbo-0125", temperature=0.5)
 
     if len(metadata) > 0:
-        # Split the metadata string into an array separated by commas,
-        # strip each element, and add "add this" to each element
-        metadata_array = [data.strip() for data in metadata.split(",")]
-        metadata_array.append("Ley N° 254 CODIGO PROCESAL CONSTITUCIONAL")
 
         retriever = MultiQueryRetriever.from_llm(
             retriever=db.as_retriever(
                 search_kwargs={
-                    "k": 3,
+                    "k": 5,
                     "filter": {
-                        "terms": {"metadata.expediente.keyword": metadata_array}
+                        "terms": {"metadata.expediente.keyword": metadata}
                     },
                 }
             ),
@@ -195,6 +213,13 @@ def chatbot(prompt, metadata):
         Use the following pieces of retrieved context to answer the question. \
         If you don't know the answer, just say that you don't know. \
         Use three sentences maximum and keep the answer concise.\
+
+        {context}"""
+
+    qa_system_prompt_v1 = """You are an assistant specialized in cryptography. \
+        Use the following pieces of retrieved context to answer the question. \
+        If you don't know the answer, just say that you don't know. \
+        Keep the answer concise and well explained.\
 
         {context}"""
     qa_prompt = ChatPromptTemplate.from_messages(
@@ -230,12 +255,13 @@ def chatbot(prompt, metadata):
         results = rag_chain_with_source.invoke(
             {"question": prompt, "chat_history": chat_history.messages}
         )
+        cost = cb.total_cost
         print(cb)
 
     chat_history.add_user_message(prompt)
     chat_history.add_ai_message(results["answer"])
 
-    return results
+    return results,cost
 
 
 def format_docs(docs):
@@ -283,6 +309,7 @@ def main():
             for message in st.session_state.messages:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
+            st.rerun()
 
         authenticator.logout("Salir")
         st.write(f'Bienvenido *{st.session_state["name"]}*')
@@ -293,7 +320,7 @@ def main():
             type="pdf",
         )
 
-        expediente = st.text_input("Ingresa el No. Expediente")
+        expediente = st.text_input("Ingresa el nombre del archivo")
 
         if pdf_docs is not None and st.button("Procesar") and len(expediente) > 0:
             with st.spinner("Procesando..."):
@@ -310,8 +337,20 @@ def main():
                 text_chunks = get_text_chunks_elasticSearch(documents)
                 # create vector store
                 vectorstore = get_vectorstore_elasticSearch(text_chunks)
+            save_filename(expediente)
+            st.rerun()
         else:
-            st.write("Introduce No. Expediente")
+            st.write("Ingresa el nombre del archivo")
+        
+        st.write("Filtro")
+        filters = get_filenames()
+        filtro = st.multiselect(
+            "Seleccione el nombre para filtrar",
+            filters,
+            placeholder="Seleccionar..."
+        )
+        
+
 
     # React to user input
 
@@ -323,7 +362,8 @@ def main():
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        answer = chatbot(prompt, expediente)
+        answer , cost  = chatbot(prompt, filtro)
+
         # Display assistant response in chat message container
         with st.chat_message("assistant"):
             response = st.write(answer["answer"])
@@ -343,6 +383,15 @@ def main():
             agreelabel="ok",
             width_dialog="xl",
         )
+        dialog2 = st_mui_dialog(
+            title="Costo",
+            content="Costo Total USD: $" + format(cost, '.15f'),
+            button_txt="Costo",
+            abortlabel="Cancelar",
+            agreelabel="ok",
+            width_dialog="xl",
+        )
+
 
 
 if __name__ == "__main__":
