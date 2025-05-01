@@ -171,7 +171,7 @@ def chatbot(prompt, metadata):
     )
     db.client.indices.refresh(index=ELASTICSEARCH_INDEX_NAME)
 
-    llm = ChatOpenAI(model_name="gpt-3.5-turbo-0125", temperature=0.5)
+    llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0.5)
 
     if len(metadata) > 0:
 
